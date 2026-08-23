@@ -9,13 +9,8 @@ terraform {
   }
 }
 
-variable "aws_region" {
-  description = "AWS Region in which to deploy the Finance Capybara infrastructure."
-  type        = string
-}
-
 provider "aws" {
-  region = var.aws_region
+  region = "us-east-1"
 }
 
 data "aws_caller_identity" "current" {}
