@@ -1,0 +1,214 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTerraformIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadTerraformStateBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::terraform-state-545978922966",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "finance-capybara-infra/terraform.tfstate",
+            "finance-capybara-infra/terraform.tfstate.tflock"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadWriteTerraformState",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::terraform-state-545978922966/finance-capybara-infra/terraform.tfstate",
+        "arn:aws:s3:::terraform-state-545978922966/finance-capybara-infra/terraform.tfstate.tflock"
+      ]
+    },
+    {
+      "Sid": "ReleaseTerraformStateLock",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::terraform-state-545978922966/finance-capybara-infra/terraform.tfstate.tflock"
+    },
+    {
+      "Sid": "ManageFinanceCapybaraBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::fcb-enabled-tickers",
+        "arn:aws:s3:::fcb-aggregated-daily-runs"
+      ]
+    },
+    {
+      "Sid": "DiscoverFinanceCapybaraQueues",
+      "Effect": "Allow",
+      "Action": "sqs:ListQueues",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageInboundTickerQueue",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:DeleteQueue",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+        "sqs:ListQueueTags",
+        "sqs:SetQueueAttributes",
+        "sqs:TagQueue",
+        "sqs:UntagQueue"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:545978922966:fcb-inbound-ticker-interest"
+    },
+    {
+      "Sid": "ManageFinanceCapybaraLambdas",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionConcurrency",
+        "lambda:GetFunctionConfiguration",
+        "lambda:ListTags",
+        "lambda:ListVersionsByFunction",
+        "lambda:TagResource",
+        "lambda:UntagResource",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:lambda:us-east-1:545978922966:function:fcb-pivoter",
+        "arn:aws:lambda:us-east-1:545978922966:function:fcb-aggregator"
+      ]
+    },
+    {
+      "Sid": "ManageFinanceCapybaraLambdaRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::545978922966:role/fcb-pivoter-role",
+        "arn:aws:iam::545978922966:role/fcb-aggregator-role"
+      ]
+    },
+    {
+      "Sid": "PassFinanceCapybaraLambdaRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::545978922966:role/fcb-pivoter-role",
+        "arn:aws:iam::545978922966:role/fcb-aggregator-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "DiscoverFinanceCapybaraLogGroups",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageFinanceCapybaraLogGroups",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:ListTagsForResource",
+        "logs:PutRetentionPolicy",
+        "logs:TagResource",
+        "logs:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-1:545978922966:log-group:fcb-pivoter-logs",
+        "arn:aws:logs:us-east-1:545978922966:log-group:fcb-pivoter-logs:*",
+        "arn:aws:logs:us-east-1:545978922966:log-group:fcb-aggregator-logs",
+        "arn:aws:logs:us-east-1:545978922966:log-group:fcb-aggregator-logs:*"
+      ]
+    },
+    {
+      "Sid": "CreateTaggedFinanceCapybaraKey",
+      "Effect": "Allow",
+      "Action": "kms:CreateKey",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "finance-capybara"
+        }
+      }
+    },
+    {
+      "Sid": "DiscoverKmsAliases",
+      "Effect": "Allow",
+      "Action": "kms:ListAliases",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageTaggedFinanceCapybaraKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CancelKeyDeletion",
+        "kms:DescribeKey",
+        "kms:DisableKey",
+        "kms:DisableKeyRotation",
+        "kms:EnableKey",
+        "kms:EnableKeyRotation",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:ListResourceTags",
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:TagResource",
+        "kms:UntagResource"
+      ],
+      "Resource": "arn:aws:kms:us-east-1:545978922966:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "finance-capybara"
+        }
+      }
+    },
+    {
+      "Sid": "ManageFinanceCapybaraMasterAlias",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:DeleteAlias",
+        "kms:UpdateAlias"
+      ],
+      "Resource": [
+        "arn:aws:kms:us-east-1:545978922966:alias/fcb-master-key",
+        "arn:aws:kms:us-east-1:545978922966:key/*"
+      ]
+    }
+  ]
+}
