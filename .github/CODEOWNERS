@@ -1,0 +1,2 @@
+# Require this owner for every PR when main's code-owner protection is enabled.
+* @GBarbosa1
