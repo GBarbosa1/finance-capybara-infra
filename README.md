@@ -108,14 +108,17 @@ uses these exact conditions:
 {
   "StringEquals": {
     "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-    "token.actions.githubusercontent.com:sub": "repo:GBarbosa1/finance-capybara-infra:environment:production"
+    "token.actions.githubusercontent.com:sub": "repo:GBarbosa1@97404958/finance-capybara-infra@1343760649:environment:production"
   }
 }
 ```
 
 In **Settings → Environments → production → Deployment branches and tags**,
 allow only the **branch** `main` (no tags). This setting is essential: an
-environment-based OIDC subject does not itself identify the branch.
+environment-based OIDC subject does not itself identify the branch. The owner
+and repository IDs in the subject match this GitHub account's customized OIDC
+subject format and prevent a renamed or replaced repository from inheriting
+deployment access.
 
 If the state path already manages the older experimental DynamoDB/queue
 configuration from `feature/first-deploy`, review a state-backed plan and migrate
