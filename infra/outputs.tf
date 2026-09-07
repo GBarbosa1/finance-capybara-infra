@@ -19,6 +19,10 @@ output "inbound_ticker_interest_queue_url" {
   value = aws_sqs_queue.inbound_ticker_interest.url
 }
 
+output "pivoter_ecr_repository_url" {
+  value = aws_ecr_repository.pivoter.repository_url
+}
+
 output "lambda_arns" {
   value = { for name, worker in aws_lambda_function.worker : name => worker.arn }
 }
