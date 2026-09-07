@@ -14,3 +14,9 @@ variable "bucket_name_suffix" {
     error_message = "Use an empty suffix or a hyphen followed by 1-37 lowercase letters, numbers or hyphens; end with a letter or number."
   }
 }
+
+variable "pivoter_image_tag" {
+  description = "Image tag in the fcb-pivoter ECR repository to deploy. The deploy workflow sets this to the built image's commit SHA; the default is a placeholder for local plan/validate only."
+  type        = string
+  default     = "bootstrap"
+}

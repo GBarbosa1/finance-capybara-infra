@@ -50,16 +50,57 @@ cannot upload enabled ticker files.
 
 ## Lambda implementation boundary
 
-`infra/lambda/pivoter/handler.py` and `infra/lambda/aggregator/handler.py` are
-packaged automatically. They deliberately raise `NotImplementedError` until
-the business logic is supplied, so unprocessed work cannot look successful.
-No S3 notifications, schedules, public endpoints or SQS event source mappings
-are created by this scaffold. Add triggers after implementing and testing the
-message format and processing logic. The queue's visibility timeout is already
-six times the aggregator timeout for a future SQS mapping.
+`infra/lambda/aggregator/handler.py` is packaged automatically and still
+deliberately raises `NotImplementedError` until its business logic is
+supplied, so unprocessed work cannot look successful. `infra/lambda/pivoter/`
+is implemented: on each invocation it lists every object in
+`ENABLED_TICKERS_BUCKET`, and for each one fetches recent daily prices via
+`yfinance`, computes a simple moving average and checks for a recent
+downward-to-upward trend reversal (a "pivot"). Each enabled-ticker object is
+a small JSON document:
+
+```json
+{"ticker": "AAPL", "sma_window": 20, "lookback_days": 30}
+```
+
+`lookback_days` is optional (defaults to 30). When a ticker shows a pivot
+within the lookback window, pivoter publishes to `INBOUND_QUEUE_URL`:
+
+```json
+{"datetime": "2026-09-07T14:32:01.123456+00:00", "ticker": "AAPL", "pivot_date": "2026-08-25"}
+```
+
+A failure fetching or analyzing one ticker is caught and recorded rather than
+aborting the whole run; the function returns `{"checked", "pivots_detected",
+"errors"}` for each invocation. No S3 notifications, schedules, public
+endpoints or SQS event source mappings are created by this scaffold — pivoter
+is not yet invoked automatically. Add triggers after testing the message
+format and processing logic. The queue's visibility timeout is already six
+times the aggregator timeout for a future SQS mapping.
 
 Both functions receive `KMS_KEY_ARN` and `INBOUND_QUEUE_URL`. Pivoter also receives
 `ENABLED_TICKERS_BUCKET`; aggregator receives `AGGREGATED_RUNS_BUCKET`.
+
+### Pivoter packaging: container image
+
+`yfinance` and `pandas` are too large to fit a zip-based Lambda package
+reliably under AWS's 250MB uncompressed size limit (confirmed by measuring
+the real dependency tree, including AWS's own managed pandas layer — it
+lands right at the ceiling with no safe margin). Pivoter is therefore
+packaged as a container image and deployed to the `fcb-pivoter` ECR
+repository (`infra/ecr.tf`), built from `infra/lambda/pivoter/Dockerfile`.
+`aggregator` remains a plain zip package; `local.functions` in `main.tf`
+sets each function's `package_type` and `lambda.tf` branches on it.
+
+The deploy workflow builds and pushes the image before the main
+`terraform plan`/`apply`, tagged with the commit SHA, and passes that tag in
+as `TF_VAR_pivoter_image_tag`. This is a two-phase apply: the ECR repository
+itself is created first (`-target=aws_ecr_repository.pivoter`) so there's
+somewhere to push to, since the Lambda function's `image_uri` must already
+exist in ECR before Terraform can create or update the function. Switching
+`fcb-pivoter` from `Zip` to `Image` packaging replaces the function (AWS
+does not allow `package_type` to change in place); nothing currently invokes
+it automatically, so the brief gap during replacement is low-risk.
 
 ## GitHub deployment
 
@@ -92,10 +133,18 @@ single Lambda. Replace them with the checked-in
 `.github/aws-deployer-trust-policy.json` and
 `.github/aws-deployer-permissions-policy.json`. The new policy limits application
 resource management to the requested `fcb-` buckets, queue, functions, roles,
-logs and tagged KMS key. It grants state access only to
-`finance-capybara-infra/terraform.tfstate` and its lock file in the provided
-state bucket. If that bucket uses a customer KMS key, grant access to that key
-separately. The application master key is created after backend initialization.
+logs, tagged KMS key and the `fcb-pivoter` ECR repository. It grants state
+access only to `finance-capybara-infra/terraform.tfstate` and its lock file
+in the provided state bucket. If that bucket uses a customer KMS key, grant
+access to that key separately. The application master key is created after
+backend initialization.
+
+`.github/aws-deployer-permissions-policy.json` is a snapshot applied to the
+IAM role manually (Terraform does not manage this role or its policy); if you
+add or change a statement in that file — such as the ECR permissions added
+for pivoter's container image build — reapply it to the live
+`pivoter-github-actions-deployer` role before the next deploy, or the
+workflow's Docker push step will fail with AccessDenied.
 
 The state bucket was verified in `us-east-1` with versioning enabled and default
 SSE-S3 encryption. Its existing safeguards provide recoverable state history;

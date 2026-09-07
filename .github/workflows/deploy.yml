@@ -60,7 +60,36 @@ jobs:
         run: terraform validate
       - name: Test infrastructure contracts without AWS resources
         run: terraform test
+      - name: Ensure the pivoter ECR repository exists
+        run: >-
+          terraform apply -input=false -lock-timeout=5m -auto-approve
+          -target=aws_ecr_repository.pivoter -target=aws_ecr_lifecycle_policy.pivoter
+      - name: Resolve the pivoter ECR repository URL
+        id: pivoter-ecr
+        run: |
+          repository_url=$(terraform output -raw pivoter_ecr_repository_url)
+          echo "repository_url=${repository_url}" >> "$GITHUB_OUTPUT"
+          echo "repository_url_host=${repository_url%%/*}" >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Log in to the pivoter ECR repository
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ${{ steps.pivoter-ecr.outputs.repository_url_host }}
+      - name: Build and push the pivoter image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: infra/lambda/pivoter
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.pivoter-ecr.outputs.repository_url }}:${{ github.sha }}
       - name: Plan infrastructure
         run: terraform plan -input=false -lock-timeout=5m -out=tfplan
+        env:
+          TF_VAR_pivoter_image_tag: ${{ github.sha }}
       - name: Apply the saved plan
         run: terraform apply -input=false -lock-timeout=5m tfplan

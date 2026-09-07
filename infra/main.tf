@@ -9,7 +9,8 @@ locals {
   }
   functions = {
     pivoter = {
-      description = "Reads enabled ticker objects and publishes ticker interest to SQS."
+      description  = "Detects SMA pivots for enabled tickers and publishes ticker interest to SQS."
+      package_type = "Image"
       environment = {
         ENABLED_TICKERS_BUCKET = aws_s3_bucket.data["enabled_tickers"].id
         INBOUND_QUEUE_URL      = aws_sqs_queue.inbound_ticker_interest.url
@@ -17,7 +18,8 @@ locals {
       }
     }
     aggregator = {
-      description = "Consumes ticker interest from SQS and writes aggregated daily runs."
+      description  = "Consumes ticker interest from SQS and writes aggregated daily runs."
+      package_type = "Zip"
       environment = {
         INBOUND_QUEUE_URL      = aws_sqs_queue.inbound_ticker_interest.url
         AGGREGATED_RUNS_BUCKET = aws_s3_bucket.data["aggregated_daily_runs"].id
@@ -25,4 +27,6 @@ locals {
       }
     }
   }
+
+  zip_functions = { for k, v in local.functions : k => v if v.package_type == "Zip" }
 }
