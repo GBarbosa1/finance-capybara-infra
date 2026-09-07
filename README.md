@@ -127,44 +127,49 @@ the same tests, a plan and application of that saved plan.
 the environment secret `AWS_ROLE_TO_ASSUME`. The `production` environment is
 configured to allow only the branch `main`.
 
-The state bucket and deployment IAM role already exist. The role's previous
-trust and inline policy target the older `pivoter` repository, state path and
-single Lambda. Replace them with the checked-in
+The state bucket already exists and is not managed by this configuration —
+the bucket holding Terraform's own state can't practically create itself.
+The deployment IAM role, `pivoter-github-actions-deployer`, previously
+existed outside Terraform (its earlier trust and inline policy targeted the
+older `pivoter` repository, state path and single Lambda) but is now defined
+in `infra/deployer.tf` and was imported into state, so changes to its trust
+or permissions policy now go through the normal plan/apply flow like every
+other resource here — no more manually reapplying a policy to the live role.
+Its policy documents stay as the standalone, human-reviewable JSON files
 `.github/aws-deployer-trust-policy.json` and
-`.github/aws-deployer-permissions-policy.json`. The new policy limits application
-resource management to the requested `fcb-` buckets, queue, functions, roles,
-logs, tagged KMS key and the `fcb-pivoter` ECR repository. It grants state
-access only to `finance-capybara-infra/terraform.tfstate` and its lock file
-in the provided state bucket. If that bucket uses a customer KMS key, grant
-access to that key separately. The application master key is created after
-backend initialization.
-
-`.github/aws-deployer-permissions-policy.json` is a snapshot applied to the
-IAM role manually (Terraform does not manage this role or its policy); if you
-add or change a statement in that file — such as the ECR permissions added
-for pivoter's container image build — reapply it to the live
-`pivoter-github-actions-deployer` role before the next deploy, or the
-workflow's Docker push step will fail with AccessDenied.
+`.github/aws-deployer-permissions-policy.json` (loaded via `file()`) rather
+than being inlined into HCL, since this is the role that runs Terraform
+itself and keeping the documents reviewable on their own matters here. The
+policy limits application resource management to the requested `fcb-`
+buckets, queue, functions, roles, logs, tagged KMS key and the `fcb-pivoter`
+ECR repository. It grants state access only to
+`finance-capybara-infra/terraform.tfstate` and its lock file in the state
+bucket. If that bucket uses a customer KMS key, grant access to that key
+separately. The application master key is created after backend
+initialization.
 
 The state bucket was verified in `us-east-1` with versioning enabled and default
 SSE-S3 encryption. Its existing safeguards provide recoverable state history;
 the deployment policy does not require access to a separate state KMS key.
 
-Because the job retains `environment: production`, the replacement trust policy
-uses these exact conditions:
+Because the job retains `environment: production`, the trust policy uses
+these exact conditions:
 
 ```json
 {
   "StringEquals": {
     "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-    "token.actions.githubusercontent.com:sub": "repo:GBarbosa1/finance-capybara-infra:environment:production"
+    "token.actions.githubusercontent.com:sub": "repo:GBarbosa1@97404958/finance-capybara-infra@1343760649:environment:production"
   }
 }
 ```
 
 In **Settings → Environments → production → Deployment branches and tags**,
 allow only the **branch** `main` (no tags). This setting is essential: an
-environment-based OIDC subject does not itself identify the branch.
+environment-based OIDC subject does not itself identify the branch. The owner
+and repository IDs in the subject match this GitHub account's customized OIDC
+subject format and prevent a renamed or replaced repository from inheriting
+deployment access.
 
 If the state path already manages the older experimental DynamoDB/queue
 configuration from `feature/first-deploy`, review a state-backed plan and migrate
