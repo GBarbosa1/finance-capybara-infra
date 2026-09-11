@@ -463,23 +463,30 @@ def _wait_for_update(name):
     waiter.wait(FunctionName=name)
 
 
-def ensure_sqs_trigger(queue_arn, function_name, batch_size=10):
+def ensure_sqs_trigger(queue_arn, function_name, batch_size=10, max_batching_window_seconds=30):
+    # A batching window matters even at low throughput: pivoter sends one SQS message per
+    # ticker as it works through the list, so without a window almost every invocation of
+    # aggregator sees just 1 message, turning what should be one summary notification into
+    # one per ticker.
     existing = lambda_.list_event_source_mappings(EventSourceArn=queue_arn, FunctionName=function_name)[
         "EventSourceMappings"
     ]
     if existing:
         mapping = existing[0]
-        if mapping["State"] not in ("Enabled", "Creating", "Updating"):
-            lambda_.update_event_source_mapping(UUID=mapping["UUID"], Enabled=True, BatchSize=batch_size)
-            log(f"Re-enabled SQS trigger for {function_name}")
-        else:
-            log(f"SQS trigger already exists for {function_name}")
+        lambda_.update_event_source_mapping(
+            UUID=mapping["UUID"],
+            Enabled=True,
+            BatchSize=batch_size,
+            MaximumBatchingWindowInSeconds=max_batching_window_seconds,
+        )
+        log(f"SQS trigger reconciled for {function_name}")
         return mapping["UUID"]
 
     mapping = lambda_.create_event_source_mapping(
         EventSourceArn=queue_arn,
         FunctionName=function_name,
         BatchSize=batch_size,
+        MaximumBatchingWindowInSeconds=max_batching_window_seconds,
         Enabled=True,
     )
     log(f"Created SQS trigger for {function_name}")
