@@ -375,7 +375,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--pivoter-image-uri",
-        help="Full ECR image URI:tag to deploy for fcb-pivoter. Required unless --ecr-repo-only.",
+        help="Full ECR image URI:tag to deploy for fcb-pivoter. If omitted, everything else is "
+        "still provisioned/updated and the pivoter Lambda function itself is left untouched.",
     )
     parser.add_argument("--bucket-suffix", default=os.environ.get("BUCKET_NAME_SUFFIX", ""))
     parser.add_argument(
@@ -389,9 +390,6 @@ def main():
     if args.ecr_repo_only:
         print(ensure_ecr_repository())
         return
-
-    if not args.pivoter_image_uri:
-        parser.error("--pivoter-image-uri is required unless --ecr-repo-only is set")
 
     key_arn = ensure_kms_key()
 
@@ -484,18 +482,21 @@ def main():
         },
     )
 
-    ensure_image_function(
-        f"{PREFIX}-pivoter",
-        "Detects SMA pivots for enabled tickers and publishes ticker interest to SQS.",
-        pivoter_role_arn,
-        {
-            "ENABLED_TICKERS_BUCKET": enabled_tickers_bucket,
-            "INBOUND_QUEUE_URL": queue_url,
-            "KMS_KEY_ARN": key_arn,
-        },
-        f"{PREFIX}-pivoter-logs",
-        args.pivoter_image_uri,
-    )
+    if args.pivoter_image_uri:
+        ensure_image_function(
+            f"{PREFIX}-pivoter",
+            "Detects SMA pivots for enabled tickers and publishes ticker interest to SQS.",
+            pivoter_role_arn,
+            {
+                "ENABLED_TICKERS_BUCKET": enabled_tickers_bucket,
+                "INBOUND_QUEUE_URL": queue_url,
+                "KMS_KEY_ARN": key_arn,
+            },
+            f"{PREFIX}-pivoter-logs",
+            args.pivoter_image_uri,
+        )
+    else:
+        log("No --pivoter-image-uri given; leaving the fcb-pivoter Lambda function untouched.")
 
     ensure_zip_function(
         f"{PREFIX}-aggregator",
