@@ -65,6 +65,8 @@ jobs:
           context: infra/lambda/pivoter
           platforms: linux/arm64
           push: true
+          provenance: false
+          sbom: false
           tags: ${{ steps.pivoter-ecr.outputs.repository_url }}:${{ github.sha }}
       - name: Deploy infrastructure and both Lambda functions
         run: >-

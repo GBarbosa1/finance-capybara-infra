@@ -322,7 +322,30 @@ def ensure_zip_function(name, description, role_arn, environment, log_group_name
     log(f"Updated Lambda function: {name}")
 
 
+SUPPORTED_IMAGE_MEDIA_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+}
+
+
+def _validate_image_manifest(image_uri):
+    repository_and_tag = image_uri.split("/", 1)[1]
+    repository, _, tag = repository_and_tag.rpartition(":")
+    manifest = json.loads(
+        ecr.batch_get_image(repositoryName=repository, imageIds=[{"imageTag": tag}])["images"][0]["imageManifest"]
+    )
+    media_type = manifest.get("mediaType")
+    if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+        raise RuntimeError(
+            f"{image_uri} has manifest mediaType={media_type!r}, which Lambda rejects — it needs a "
+            "single-platform image manifest, not a multi-platform index/manifest-list. If built with "
+            "docker buildx, pass provenance=false and sbom=false to avoid the attestation manifest."
+        )
+
+
 def ensure_image_function(name, description, role_arn, environment, log_group_name, image_uri):
+    _validate_image_manifest(image_uri)
+
     common = dict(
         FunctionName=name,
         Description=description,
