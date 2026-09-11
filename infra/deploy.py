@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Idempotently provisions and deploys the Finance Capybara pipeline: KMS key,
-S3 buckets, SQS queue, Lambda IAM roles, log groups, the pivoter ECR
-repository, and both Lambda functions. Safe to re-run; only creates what's
-missing and updates what differs from the desired state below.
+S3 buckets, SQS queue, SNS topic, Lambda IAM roles, log groups, the pivoter
+ECR repository, both Lambda functions, and the SQS-to-aggregator trigger.
+Safe to re-run; only creates what's missing and updates what differs from
+the desired state below.
 
-Usage: python deploy.py --pivoter-image-uri <ecr-repo-url>:<tag>
+Usage: python deploy.py --pivoter-image-uri <ecr-repo-url>:<tag> --notification-phone-number +15551234567
 """
 import argparse
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -30,6 +34,7 @@ iam = session.client("iam")
 logs = session.client("logs")
 ecr = session.client("ecr")
 lambda_ = session.client("lambda")
+sns = session.client("sns")
 
 ACCOUNT_ID = sts.get_caller_identity()["Account"]
 TAGS = {"Project": "finance-capybara", "ManagedBy": "deploy-script", "Environment": "production"}
@@ -268,6 +273,22 @@ def ensure_ecr_repository():
     return repo["repositoryUri"]
 
 
+# --- SNS -------------------------------------------------------------------
+
+def ensure_sns_topic(key_arn, phone_number):
+    name = f"{PREFIX}-outbound-ticker-notification"
+    topic_arn = sns.create_topic(
+        Name=name,
+        Attributes={"KmsMasterKeyId": key_arn},
+        Tags=[{"Key": k, "Value": v} for k, v in tags_block(name).items()],
+    )["TopicArn"]
+    log(f"SNS topic ready: {topic_arn}")
+
+    sns.subscribe(TopicArn=topic_arn, Protocol="sms", Endpoint=phone_number)
+    log(f"SMS subscription ensured for {topic_arn}")
+    return topic_arn
+
+
 # --- Lambda ----------------------------------------------------------------
 
 def zip_directory(directory: Path) -> bytes:
@@ -279,8 +300,58 @@ def zip_directory(directory: Path) -> bytes:
     return buf.getvalue()
 
 
+MAX_ZIP_BYTES = 45_000_000  # Lambda's direct ZipFile upload API caps out around 50MB compressed.
+
+
+def build_lambda_zip(name: str) -> bytes:
+    source_dir = LAMBDA_DIR / name
+    requirements_file = source_dir / "requirements.txt"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        if requirements_file.exists():
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--platform",
+                    "manylinux2014_aarch64",
+                    "--implementation",
+                    "cp",
+                    "--python-version",
+                    "3.13",
+                    "--only-binary=:all:",
+                    "--target",
+                    str(tmp_path),
+                    "--no-compile",
+                    "-r",
+                    str(requirements_file),
+                ],
+                check=True,
+            )
+            for dist_info in tmp_path.glob("*.dist-info"):
+                shutil.rmtree(dist_info)
+            for pycache in tmp_path.rglob("__pycache__"):
+                shutil.rmtree(pycache)
+
+        for py_file in source_dir.glob("*.py"):
+            shutil.copy(py_file, tmp_path / py_file.name)
+
+        zip_bytes = zip_directory(tmp_path)
+
+    if len(zip_bytes) > MAX_ZIP_BYTES:
+        raise RuntimeError(
+            f"{name}'s deployment zip is {len(zip_bytes) / 1e6:.1f}MB, over the "
+            f"{MAX_ZIP_BYTES / 1e6:.0f}MB safety threshold for direct ZipFile upload. "
+            "Switch to S3-based Lambda code upload (S3Bucket/S3Key) instead."
+        )
+    return zip_bytes
+
+
 def ensure_zip_function(name, description, role_arn, environment, log_group_name):
-    zip_bytes = zip_directory(LAMBDA_DIR / "aggregator")
+    zip_bytes = build_lambda_zip(name.removeprefix(f"{PREFIX}-"))
     common = dict(
         FunctionName=name,
         Description=description,
@@ -392,6 +463,29 @@ def _wait_for_update(name):
     waiter.wait(FunctionName=name)
 
 
+def ensure_sqs_trigger(queue_arn, function_name, batch_size=10):
+    existing = lambda_.list_event_source_mappings(EventSourceArn=queue_arn, FunctionName=function_name)[
+        "EventSourceMappings"
+    ]
+    if existing:
+        mapping = existing[0]
+        if mapping["State"] not in ("Enabled", "Creating", "Updating"):
+            lambda_.update_event_source_mapping(UUID=mapping["UUID"], Enabled=True, BatchSize=batch_size)
+            log(f"Re-enabled SQS trigger for {function_name}")
+        else:
+            log(f"SQS trigger already exists for {function_name}")
+        return mapping["UUID"]
+
+    mapping = lambda_.create_event_source_mapping(
+        EventSourceArn=queue_arn,
+        FunctionName=function_name,
+        BatchSize=batch_size,
+        Enabled=True,
+    )
+    log(f"Created SQS trigger for {function_name}")
+    return mapping["UUID"]
+
+
 # --- Main --------------------------------------------------------------------
 
 def main():
@@ -402,6 +496,12 @@ def main():
         "still provisioned/updated and the pivoter Lambda function itself is left untouched.",
     )
     parser.add_argument("--bucket-suffix", default=os.environ.get("BUCKET_NAME_SUFFIX", ""))
+    parser.add_argument(
+        "--notification-phone-number",
+        default=os.environ.get("NOTIFICATION_PHONE_NUMBER"),
+        help="E.164 phone number (e.g. +15551234567) to subscribe to the outbound ticker "
+        "notification topic via SMS. Required unless --ecr-repo-only.",
+    )
     parser.add_argument(
         "--ecr-repo-only",
         action="store_true",
@@ -414,6 +514,9 @@ def main():
         print(ensure_ecr_repository())
         return
 
+    if not args.notification_phone_number:
+        parser.error("--notification-phone-number (or NOTIFICATION_PHONE_NUMBER) is required unless --ecr-repo-only is set")
+
     key_arn = ensure_kms_key()
 
     enabled_tickers_bucket = f"{PREFIX}-enabled-tickers{args.bucket_suffix}"
@@ -422,6 +525,8 @@ def main():
     ensure_bucket(aggregated_runs_bucket, key_arn)
 
     queue_url, queue_arn = ensure_queue(key_arn)
+
+    topic_arn = ensure_sns_topic(key_arn, args.notification_phone_number)
 
     ecr_repo_uri = ensure_ecr_repository()
 
@@ -496,6 +601,12 @@ def main():
                     "Resource": f"arn:aws:s3:::{aggregated_runs_bucket}/*",
                 },
                 {
+                    "Sid": "PublishTickerNotifications",
+                    "Effect": "Allow",
+                    "Action": ["sns:Publish"],
+                    "Resource": topic_arn,
+                },
+                {
                     "Sid": "DecryptSQSAndEncryptS3",
                     "Effect": "Allow",
                     "Action": ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"],
@@ -529,9 +640,11 @@ def main():
             "INBOUND_QUEUE_URL": queue_url,
             "AGGREGATED_RUNS_BUCKET": aggregated_runs_bucket,
             "KMS_KEY_ARN": key_arn,
+            "OUTBOUND_TOPIC_ARN": topic_arn,
         },
         f"{PREFIX}-aggregator-logs",
     )
+    ensure_sqs_trigger(queue_arn, f"{PREFIX}-aggregator")
 
     log(f"Done. ECR repository: {ecr_repo_uri}")
 

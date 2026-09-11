@@ -25,6 +25,7 @@ jobs:
     env:
       AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       BUCKET_NAME_SUFFIX: ${{ vars.S3_BUCKET_NAME_SUFFIX }}
+      NOTIFICATION_PHONE_NUMBER: ${{ secrets.NOTIFICATION_PHONE_NUMBER }}
     defaults:
       run:
         working-directory: infra
@@ -33,6 +34,7 @@ jobs:
       - name: Check deployment configuration
         run: |
           test -n "$AWS_ROLE_TO_ASSUME" || { echo "Missing AWS_ROLE_TO_ASSUME secret"; exit 1; }
+          test -n "$NOTIFICATION_PHONE_NUMBER" || { echo "Missing NOTIFICATION_PHONE_NUMBER secret"; exit 1; }
       - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
         with:
           aws-region: ${{ env.AWS_REGION }}

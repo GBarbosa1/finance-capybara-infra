@@ -242,6 +242,34 @@
         "ecr:DescribeImages"
       ],
       "Resource": "arn:aws:ecr:us-east-1:545978922966:repository/fcb-pivoter"
+    },
+    {
+      "Sid": "ManageFinanceCapybaraNotificationTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:ListSubscriptionsByTopic"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:545978922966:fcb-outbound-ticker-notification"
+    },
+    {
+      "Sid": "ManageAggregatorQueueTrigger",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping",
+        "lambda:GetEventSourceMapping",
+        "lambda:ListEventSourceMappings",
+        "lambda:UpdateEventSourceMapping"
+      ],
+      "Resource": "*"
     }
   ]
 }

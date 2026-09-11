@@ -15,6 +15,7 @@ namespace.
 | Aggregator Lambda / role | `fcb-aggregator` / `fcb-aggregator-role` |
 | Daily runs bucket | `fcb-aggregated-daily-runs` |
 | Lambda log groups | `fcb-pivoter-logs`, `fcb-aggregator-logs` |
+| Outbound SMS topic | `fcb-outbound-ticker-notification` |
 
 The inconsistent `fc`, `fcb0-enabled tickers`, `aggreggated`, and `agregattor`
 spellings in the request are normalized above. If an S3 name is already owned
@@ -33,9 +34,10 @@ The pivoter role can list and read the enabled ticker bucket, send messages to
 the inbound queue, and use `kms:Decrypt`, `kms:Encrypt`, and
 `kms:GenerateDataKey` on the master key only. The aggregator role can receive,
 delete, inspect and extend visibility of inbound messages, write to the daily
-runs bucket (including aborting incomplete multipart uploads), and use the same
-three KMS operations on that key. Each role can write only to its own log group.
-Neither role can assume the other role or administer KMS, S3, SQS or IAM.
+runs bucket (including aborting incomplete multipart uploads), publish to the
+outbound notification topic, and use the same three KMS operations on that
+key. Each role can write only to its own log group. Neither role can assume
+the other role or administer KMS, S3, SQS or IAM.
 
 S3 uploads must explicitly request SSE-KMS with the master **key ARN**. For example,
 with the deployed `kms_key_arn` output in `KMS_KEY_ARN`:
@@ -53,14 +55,11 @@ cannot upload enabled ticker files.
 
 ## Lambda implementation boundary
 
-`infra/lambda/aggregator/handler.py` is packaged automatically and still
-deliberately raises `NotImplementedError` until its business logic is
-supplied, so unprocessed work cannot look successful. `infra/lambda/pivoter/`
-is implemented: on each invocation it lists every object in
-`ENABLED_TICKERS_BUCKET`, and for each one fetches recent daily prices via
-`yfinance`, computes a simple moving average and checks for a recent
-downward-to-upward trend reversal (a "pivot"). Each enabled-ticker object is
-a small JSON document:
+Both functions are implemented. `infra/lambda/pivoter/` on each invocation
+lists every object in `ENABLED_TICKERS_BUCKET`, and for each one fetches
+recent daily prices via `yfinance`, computes a simple moving average and
+checks for a recent downward-to-upward trend reversal (a "pivot"). Each
+enabled-ticker object is a small JSON document:
 
 ```json
 {"ticker": "AAPL", "sma_window": 20, "lookback_days": 30}
@@ -75,14 +74,45 @@ within the lookback window, pivoter publishes to `INBOUND_QUEUE_URL`:
 
 A failure fetching or analyzing one ticker is caught and recorded rather than
 aborting the whole run; the function returns `{"checked", "pivots_detected",
-"errors"}` for each invocation. No S3 notifications, schedules, public
-endpoints or SQS event source mappings are created by this scaffold — pivoter
-is not yet invoked automatically. Add triggers after testing the message
-format and processing logic. The queue's visibility timeout is already six
-times the aggregator timeout for a future SQS mapping.
+"errors"}` for each invocation. No S3 notifications, schedules or public
+endpoints are created by this scaffold — pivoter is not yet invoked
+automatically. Add a trigger (e.g. an EventBridge schedule) once you're ready
+to run it on a cadence.
 
-Both functions receive `KMS_KEY_ARN` and `INBOUND_QUEUE_URL`. Pivoter also receives
-`ENABLED_TICKERS_BUCKET`; aggregator receives `AGGREGATED_RUNS_BUCKET`.
+`infra/lambda/aggregator/` is wired to `INBOUND_QUEUE_URL` via an SQS event
+source mapping (`ensure_sqs_trigger()` in `deploy.py`), so it runs whenever
+pivoter publishes a pivot. Each invocation receives a batch of up to 10
+messages (SQS's default `BatchSize`), parses each one (skipping and logging
+any that fail to parse rather than failing the whole batch), and if at least
+one parses:
+
+1. Writes the batch as a single Parquet file to `AGGREGATED_RUNS_BUCKET`,
+   partitioned by the **processing date** (UTC, when the Lambda runs — not
+   each message's own `pivot_date`) as
+   `year=YYYY/month=MM/day=DD/HHMMSS-<uuid>.parquet`. Many small files per
+   day is the normal shape for this pattern (no read-modify-write races);
+   Athena/Glue can query a whole day's partition regardless of file count.
+2. Publishes a summary (`"N pivot(s) detected: TICKER1, TICKER2, ..."`) to
+   `OUTBOUND_TOPIC_ARN` (`fcb-outbound-ticker-notification`), an SNS topic
+   with an SMS subscription to the phone number in `NOTIFICATION_PHONE_NUMBER`.
+   `deploy.py` requires this (as `--notification-phone-number` or the env
+   var) for every run except `--ecr-repo-only`; in CI it comes from the
+   `NOTIFICATION_PHONE_NUMBER` secret.
+
+If a batch has no parseable messages, nothing is written and no notification
+is sent — nothing worth reporting happened.
+
+Both functions receive `KMS_KEY_ARN` and `INBOUND_QUEUE_URL`. Pivoter also
+receives `ENABLED_TICKERS_BUCKET`; aggregator receives
+`AGGREGATED_RUNS_BUCKET` and `OUTBOUND_TOPIC_ARN`.
+
+`pyarrow` (for Parquet) makes aggregator's zip package ~41MB compressed —
+comfortably under the 250MB uncompressed Lambda limit, but close enough to
+the 50MB direct-`ZipFile`-upload API limit that `build_lambda_zip()` in
+`deploy.py` raises a clear error above 45MB rather than let it fail
+opaquely at the API layer. If a future dependency bump crosses that line,
+switch to S3-based Lambda code upload (`S3Bucket`/`S3Key`) instead of
+`ZipFile`.
 
 ### Pivoter packaging: container image
 
@@ -142,7 +172,19 @@ role manually (e.g. `aws iam put-role-policy`) before merging a PR that
 needs them, or the next deploy will fail with `AccessDenied` on whatever
 action was newly added. The policy limits application resource management
 to the requested `fcb-` buckets, queue, functions, roles, logs, tagged KMS
-key and the `fcb-pivoter` ECR repository.
+key, the `fcb-pivoter` ECR repository and the `fcb-outbound-ticker-notification`
+SNS topic. The Lambda event-source-mapping actions
+(`Create`/`Delete`/`Get`/`List`/`UpdateEventSourceMapping`, for wiring the
+queue to aggregator) are the one exception scoped to `Resource: "*"` rather
+than a specific ARN — the mapping's own ARN includes a UUID that doesn't
+exist until after creation, so it can't be pre-scoped like everything else
+here.
+
+`deploy.py` also needs a `NOTIFICATION_PHONE_NUMBER` secret: the E.164 phone
+number (e.g. `+15551234567`) subscribed to the outbound SNS topic for pivot
+alerts. Never commit a real phone number to this repo; it's PII and belongs
+only in the GitHub secret and whatever local env var you use for a manual
+run.
 
 Because the job retains `environment: production`, the trust policy uses
 these exact conditions:
@@ -213,6 +255,8 @@ use it.
 python -m py_compile infra/deploy.py
 pip install -r infra/lambda/pivoter/requirements-dev.txt
 pytest infra/lambda/pivoter
+pip install -r infra/lambda/aggregator/requirements-dev.txt
+pytest infra/lambda/aggregator
 ```
 
 There's no dry-run mode for `deploy.py` — unlike `terraform plan`, boto3
@@ -223,8 +267,16 @@ locally without credentials that can actually touch the `fcb-*` resources.
 If you have such credentials, run it directly:
 
 ```sh
-python infra/deploy.py --pivoter-image-uri <account>.dkr.ecr.us-east-1.amazonaws.com/fcb-pivoter:<tag>
+python infra/deploy.py \
+  --pivoter-image-uri <account>.dkr.ecr.us-east-1.amazonaws.com/fcb-pivoter:<tag> \
+  --notification-phone-number +15551234567
 ```
+
+Omit `--pivoter-image-uri` to provision/update everything except the
+pivoter Lambda itself (useful when you don't have an image built yet — see
+`--ecr-repo-only` below). `--notification-phone-number` is still required in
+that case; it (or `NOTIFICATION_PHONE_NUMBER` in the environment) is needed
+for every run except `--ecr-repo-only`.
 
 ## No Terraform: what changed and why
 

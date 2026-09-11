@@ -27,3 +27,8 @@ jobs:
       - name: Run pivoter Lambda tests
         run: pytest
         working-directory: infra/lambda/pivoter
+      - name: Install aggregator Lambda test dependencies
+        run: pip install -r infra/lambda/aggregator/requirements-dev.txt
+      - name: Run aggregator Lambda tests
+        run: pytest
+        working-directory: infra/lambda/aggregator
