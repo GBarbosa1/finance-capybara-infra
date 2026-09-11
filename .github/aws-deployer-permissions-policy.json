@@ -76,14 +76,17 @@
       "Sid": "ManageFinanceCapybaraLambdas",
       "Effect": "Allow",
       "Action": [
+        "lambda:AddPermission",
         "lambda:CreateFunction",
         "lambda:DeleteFunction",
         "lambda:GetFunction",
         "lambda:GetFunctionCodeSigningConfig",
         "lambda:GetFunctionConcurrency",
         "lambda:GetFunctionConfiguration",
+        "lambda:GetPolicy",
         "lambda:ListTags",
         "lambda:ListVersionsByFunction",
+        "lambda:RemovePermission",
         "lambda:TagResource",
         "lambda:UntagResource",
         "lambda:UpdateFunctionCode",
@@ -270,6 +273,21 @@
         "lambda:UpdateEventSourceMapping"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ManagePivoterSchedule",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:TagResource",
+        "events:UntagResource"
+      ],
+      "Resource": "arn:aws:events:us-east-1:545978922966:rule/fcb-pivoter-daily"
     }
   ]
 }

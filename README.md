@@ -16,6 +16,7 @@ namespace.
 | Daily runs bucket | `fcb-aggregated-daily-runs` |
 | Lambda log groups | `fcb-pivoter-logs`, `fcb-aggregator-logs` |
 | Outbound SMS topic | `fcb-outbound-ticker-notification` |
+| Pivoter daily schedule | `fcb-pivoter-daily` (EventBridge rule) |
 
 The inconsistent `fc`, `fcb0-enabled tickers`, `aggreggated`, and `agregattor`
 spellings in the request are normalized above. If an S3 name is already owned
@@ -74,10 +75,15 @@ within the lookback window, pivoter publishes to `INBOUND_QUEUE_URL`:
 
 A failure fetching or analyzing one ticker is caught and recorded rather than
 aborting the whole run; the function returns `{"checked", "pivots_detected",
-"errors"}` for each invocation. No S3 notifications, schedules or public
-endpoints are created by this scaffold — pivoter is not yet invoked
-automatically. Add a trigger (e.g. an EventBridge schedule) once you're ready
-to run it on a cadence.
+"errors"}` for each invocation.
+
+Pivoter runs automatically once a day via the `fcb-pivoter-daily` EventBridge
+rule (`ensure_pivoter_schedule()` in `deploy.py`): `cron(0 22 * * ? *)`, i.e.
+19:00 `America/Sao_Paulo` (UTC-3) / 22:00 UTC. A fixed UTC cron is exact here
+because Brazil has not observed DST since 2019 — there's no seasonal offset
+to account for. Classic EventBridge Rules don't support IANA timezones
+directly (EventBridge Scheduler does), which is why the UTC time is computed
+by hand in the one place it's defined rather than expressed as a local time.
 
 `infra/lambda/aggregator/` is wired to `INBOUND_QUEUE_URL` via an SQS event
 source mapping (`ensure_sqs_trigger()` in `deploy.py`), so it runs whenever
@@ -172,8 +178,9 @@ role manually (e.g. `aws iam put-role-policy`) before merging a PR that
 needs them, or the next deploy will fail with `AccessDenied` on whatever
 action was newly added. The policy limits application resource management
 to the requested `fcb-` buckets, queue, functions, roles, logs, tagged KMS
-key, the `fcb-pivoter` ECR repository and the `fcb-outbound-ticker-notification`
-SNS topic. The Lambda event-source-mapping actions
+key, the `fcb-pivoter` ECR repository, the `fcb-outbound-ticker-notification`
+SNS topic and the `fcb-pivoter-daily` EventBridge rule. The Lambda
+event-source-mapping actions
 (`Create`/`Delete`/`Get`/`List`/`UpdateEventSourceMapping`, for wiring the
 queue to aggregator) are the one exception scoped to `Resource: "*"` rather
 than a specific ARN — the mapping's own ARN includes a UUID that doesn't

@@ -35,6 +35,7 @@ logs = session.client("logs")
 ecr = session.client("ecr")
 lambda_ = session.client("lambda")
 sns = session.client("sns")
+events = session.client("events")
 
 ACCOUNT_ID = sts.get_caller_identity()["Account"]
 TAGS = {"Project": "finance-capybara", "ManagedBy": "deploy-script", "Environment": "production"}
@@ -493,6 +494,40 @@ def ensure_sqs_trigger(queue_arn, function_name, batch_size=10, max_batching_win
     return mapping["UUID"]
 
 
+# --- EventBridge -------------------------------------------------------------
+
+def ensure_pivoter_schedule(function_arn, function_name):
+    # 19:00 America/Sao_Paulo (UTC-3) is a fixed 22:00 UTC year-round — Brazil has not
+    # observed DST since 2019, so a plain UTC cron needs no timezone handling.
+    rule_name = f"{PREFIX}-pivoter-daily"
+    rule_arn = events.put_rule(
+        Name=rule_name,
+        ScheduleExpression="cron(0 22 * * ? *)",
+        State="ENABLED",
+        Description="Invokes fcb-pivoter daily at 19:00 America/Sao_Paulo (UTC-3) / 22:00 UTC.",
+    )["RuleArn"]
+    events.tag_resource(ResourceARN=rule_arn, Tags=[{"Key": k, "Value": v} for k, v in tags_block(rule_name).items()])
+
+    events.put_targets(Rule=rule_name, Targets=[{"Id": function_name, "Arn": function_arn}])
+
+    try:
+        lambda_.add_permission(
+            FunctionName=function_name,
+            StatementId=f"{rule_name}-invoke",
+            Action="lambda:InvokeFunction",
+            Principal="events.amazonaws.com",
+            SourceArn=rule_arn,
+        )
+        log(f"Granted EventBridge permission to invoke {function_name}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceConflictException":
+            raise
+        log("EventBridge invoke permission already granted")
+
+    log(f"Scheduled {rule_name}: {rule_arn}")
+    return rule_arn
+
+
 # --- Main --------------------------------------------------------------------
 
 def main():
@@ -638,6 +673,8 @@ def main():
         )
     else:
         log("No --pivoter-image-uri given; leaving the fcb-pivoter Lambda function untouched.")
+
+    ensure_pivoter_schedule(f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:{PREFIX}-pivoter", f"{PREFIX}-pivoter")
 
     ensure_zip_function(
         f"{PREFIX}-aggregator",
