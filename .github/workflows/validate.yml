@@ -11,23 +11,19 @@ concurrency:
   group: fcb-validate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-env:
-  TF_IN_AUTOMATION: "true"
-  TF_INPUT: "false"
-
 jobs:
   validate:
-    name: Terraform validation
+    name: Deploy script and Lambda tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
     steps:
       - uses: actions/checkout@v6
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/setup-python@v5
         with:
-          terraform_version: 1.13.0
-      - run: terraform fmt -check -recursive
-      - run: terraform init -backend=false -input=false -lockfile=readonly
-      - run: terraform validate
-      - run: terraform test
+          python-version: "3.13"
+      - name: Check deploy.py syntax
+        run: python -m py_compile infra/deploy.py
+      - name: Install pivoter Lambda test dependencies
+        run: pip install -r infra/lambda/pivoter/requirements-dev.txt
+      - name: Run pivoter Lambda tests
+        run: pytest
+        working-directory: infra/lambda/pivoter

@@ -13,8 +13,6 @@ concurrency:
 
 env:
   AWS_REGION: us-east-1
-  TF_IN_AUTOMATION: "true"
-  TF_INPUT: "false"
 
 jobs:
   deploy:
@@ -25,49 +23,30 @@ jobs:
       contents: read
       id-token: write
     env:
-      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
       AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-      TF_VAR_aws_region: us-east-1
-      TF_VAR_bucket_name_suffix: ${{ vars.S3_BUCKET_NAME_SUFFIX }}
+      BUCKET_NAME_SUFFIX: ${{ vars.S3_BUCKET_NAME_SUFFIX }}
     defaults:
       run:
         working-directory: infra
     steps:
       - uses: actions/checkout@v6
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.13.0
       - name: Check deployment configuration
         run: |
-          test -n "$TF_STATE_BUCKET" || { echo "Missing TF_STATE_BUCKET secret"; exit 1; }
           test -n "$AWS_ROLE_TO_ASSUME" || { echo "Missing AWS_ROLE_TO_ASSUME secret"; exit 1; }
       - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
           role-session-name: fcb-infra-github-actions
-      - name: Check formatting
-        run: terraform fmt -check -recursive
-      - name: Initialize existing state backend
-        run: >-
-          terraform init -input=false -lockfile=readonly
-          -backend-config="bucket=${TF_STATE_BUCKET}"
-          -backend-config="key=finance-capybara-infra/terraform.tfstate"
-          -backend-config="region=${AWS_REGION}"
-          -backend-config="encrypt=true"
-          -backend-config="use_lockfile=true"
-      - name: Validate Terraform
-        run: terraform validate
-      - name: Test infrastructure contracts without AWS resources
-        run: terraform test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install deploy script dependencies
+        run: pip install -r requirements.txt
       - name: Ensure the pivoter ECR repository exists
-        run: >-
-          terraform apply -input=false -lock-timeout=5m -auto-approve
-          -target=aws_ecr_repository.pivoter -target=aws_ecr_lifecycle_policy.pivoter
-      - name: Resolve the pivoter ECR repository URL
         id: pivoter-ecr
         run: |
-          repository_url=$(terraform output -raw pivoter_ecr_repository_url)
+          repository_url=$(python deploy.py --ecr-repo-only)
           echo "repository_url=${repository_url}" >> "$GITHUB_OUTPUT"
           echo "repository_url_host=${repository_url%%/*}" >> "$GITHUB_OUTPUT"
       - name: Set up QEMU
@@ -87,9 +66,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ${{ steps.pivoter-ecr.outputs.repository_url }}:${{ github.sha }}
-      - name: Plan infrastructure
-        run: terraform plan -input=false -lock-timeout=5m -out=tfplan
-        env:
-          TF_VAR_pivoter_image_tag: ${{ github.sha }}
-      - name: Apply the saved plan
-        run: terraform apply -input=false -lock-timeout=5m tfplan
+      - name: Deploy infrastructure and both Lambda functions
+        run: >-
+          python deploy.py
+          --pivoter-image-uri "${{ steps.pivoter-ecr.outputs.repository_url }}:${{ github.sha }}"
+          --bucket-suffix "${BUCKET_NAME_SUFFIX}"

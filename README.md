@@ -1,8 +1,10 @@
 # Finance Capybara infrastructure
 
-Terraform scaffold for the ticker ingestion pipeline, deployed by GitHub Actions
-in `us-east-1`. All explicitly named AWS resources start with `fcb-`; the KMS
-alias uses AWS's required `alias/` namespace.
+The ticker ingestion pipeline's infrastructure and Lambda deployment,
+provisioned directly via `infra/deploy.py` (boto3) and run by GitHub Actions
+in `us-east-1` — no Terraform or other IaC tool. All explicitly named AWS
+resources start with `fcb-`; the KMS alias uses AWS's required `alias/`
+namespace.
 
 | Resource | Deployed name |
 | --- | --- |
@@ -24,7 +26,8 @@ and permissions follow the resulting names.
 
 Both buckets block public access, disable ACLs, enable versioning and use the
 rotating master KMS key. The queue also uses that key and retains messages for
-14 days. Nonempty buckets are not automatically emptied by Terraform.
+14 days. `deploy.py` never deletes buckets, roles, or the queue — only
+creates them if missing and updates their configuration to match the script.
 
 The pivoter role can list and read the enabled ticker bucket, send messages to
 the inbound queue, and use `kms:Decrypt`, `kms:Encrypt`, and
@@ -88,69 +91,58 @@ reliably under AWS's 250MB uncompressed size limit (confirmed by measuring
 the real dependency tree, including AWS's own managed pandas layer — it
 lands right at the ceiling with no safe margin). Pivoter is therefore
 packaged as a container image and deployed to the `fcb-pivoter` ECR
-repository (`infra/ecr.tf`), built from `infra/lambda/pivoter/Dockerfile`.
-`aggregator` remains a plain zip package; `local.functions` in `main.tf`
-sets each function's `package_type` and `lambda.tf` branches on it.
+repository (`ensure_ecr_repository()` in `infra/deploy.py`), built from
+`infra/lambda/pivoter/Dockerfile`. `aggregator` stays a plain zip package,
+built in-memory from `infra/lambda/aggregator/` by `zip_directory()`.
 
-The deploy workflow builds and pushes the image before the main
-`terraform plan`/`apply`, tagged with the commit SHA, and passes that tag in
-as `TF_VAR_pivoter_image_tag`. This is a two-phase apply: the ECR repository
-itself is created first (`-target=aws_ecr_repository.pivoter`) so there's
-somewhere to push to, since the Lambda function's `image_uri` must already
-exist in ECR before Terraform can create or update the function. Switching
-`fcb-pivoter` from `Zip` to `Image` packaging replaces the function (AWS
-does not allow `package_type` to change in place); nothing currently invokes
-it automatically, so the brief gap during replacement is low-risk.
+The deploy workflow builds and pushes the image before running the main
+script, tagged with the commit SHA. This is a two-phase process: the ECR
+repository is created first (`python deploy.py --ecr-repo-only`) so there's
+somewhere to push to, since the image must already exist in ECR before
+Lambda can create or update a function pointing at it. If `fcb-pivoter` is
+ever found with `PackageType` other than `Image` (e.g. after being
+provisioned some other way), `ensure_image_function()` deletes and recreates
+it — AWS does not allow `package_type` to change in place. Nothing currently
+invokes pivoter automatically, so the brief gap during replacement is
+low-risk.
 
 ## GitHub deployment
 
-The workflow in `.github/workflows/deploy.yml` is adapted from the existing
-`feature/first-deploy` workflow. It retains:
+`.github/workflows/deploy.yml` runs on every **push to `main`**, including a
+merge or a direct push. A job-level condition also enforces the event and
+branch; there is no manual deployment entry point and no deployment on
+`master`, `develop`, feature branches or PR events. It authenticates to AWS
+via GitHub OIDC (no long-lived credentials), then:
 
-- Environment: `production`.
-- Secrets: `AWS_ROLE_TO_ASSUME` and `TF_STATE_BUCKET`.
-- Region: `us-east-1`.
-- State object: `finance-capybara-infra/terraform.tfstate` in the existing state bucket.
-- AWS authentication through GitHub OIDC, encrypted state, S3 state locking and
-  serialized deployments.
+1. Ensures the `fcb-pivoter` ECR repository exists
+   (`python deploy.py --ecr-repo-only`), so there's somewhere to push to.
+2. Builds and pushes the pivoter image for `linux/arm64`, tagged with the
+   commit SHA (via QEMU + Buildx, since the runner is x86_64).
+3. Runs `python deploy.py --pivoter-image-uri <repo>:<sha>`, which
+   provisions everything (KMS key, S3 buckets, SQS queue, both Lambda IAM
+   roles, both log groups) and creates or updates both Lambda functions.
 
-Deployment runs only on a **push to `main`**, including a merge or your direct
-push. A job-level condition also enforces the event and branch. There is no
-manual deployment entry point and no deployment on `master`, `develop`, feature
-branches or PR events. PRs targeting `main` run formatting, validation and mocked
-Terraform tests without AWS credentials. All pushes to `main` run validation,
-the same tests, a plan and application of that saved plan.
+`.github/workflows/validate.yml` runs on PRs targeting `main`: it checks
+`deploy.py`'s syntax and runs the pivoter Lambda's pytest suite. It does not
+touch AWS — there's no dry-run/plan equivalent for this scripted approach,
+so a PR only proves the Python is well-formed and the business logic is
+correct, not that the AWS calls will succeed. Review deploy.yml diffs
+carefully for that reason.
 
-`TF_STATE_BUCKET` is configured in the `production` environment as
-`terraform-state-545978922966`. The existing deployment role is
-`arn:aws:iam::545978922966:role/pivoter-github-actions-deployer`; set that ARN as
-the environment secret `AWS_ROLE_TO_ASSUME`. The `production` environment is
-configured to allow only the branch `main`.
-
-The state bucket already exists and is not managed by this configuration —
-the bucket holding Terraform's own state can't practically create itself.
-The deployment IAM role, `pivoter-github-actions-deployer`, previously
-existed outside Terraform (its earlier trust and inline policy targeted the
-older `pivoter` repository, state path and single Lambda) but is now defined
-in `infra/deployer.tf` and was imported into state, so changes to its trust
-or permissions policy now go through the normal plan/apply flow like every
-other resource here — no more manually reapplying a policy to the live role.
-Its policy documents stay as the standalone, human-reviewable JSON files
-`.github/aws-deployer-trust-policy.json` and
-`.github/aws-deployer-permissions-policy.json` (loaded via `file()`) rather
-than being inlined into HCL, since this is the role that runs Terraform
-itself and keeping the documents reviewable on their own matters here. The
-policy limits application resource management to the requested `fcb-`
-buckets, queue, functions, roles, logs, tagged KMS key and the `fcb-pivoter`
-ECR repository. It grants state access only to
-`finance-capybara-infra/terraform.tfstate` and its lock file in the state
-bucket. If that bucket uses a customer KMS key, grant access to that key
-separately. The application master key is created after backend
-initialization.
-
-The state bucket was verified in `us-east-1` with versioning enabled and default
-SSE-S3 encryption. Its existing safeguards provide recoverable state history;
-the deployment policy does not require access to a separate state KMS key.
+The deployment role is `arn:aws:iam::545978922966:role/pivoter-github-actions-deployer`;
+its ARN is the `production` environment's `AWS_ROLE_TO_ASSUME` secret, and
+that environment is configured to allow only the branch `main`. Its trust
+and permissions policies are **not** managed by `deploy.py` — a role can't
+grant itself IAM permissions it doesn't already have, so self-managing it
+from CI would either be impossible on the first grant or a privilege-escalation
+risk on every later one. Its policy documents stay as the standalone,
+human-reviewable JSON files `.github/aws-deployer-trust-policy.json` and
+`.github/aws-deployer-permissions-policy.json`; apply changes to the live
+role manually (e.g. `aws iam put-role-policy`) before merging a PR that
+needs them, or the next deploy will fail with `AccessDenied` on whatever
+action was newly added. The policy limits application resource management
+to the requested `fcb-` buckets, queue, functions, roles, logs, tagged KMS
+key and the `fcb-pivoter` ECR repository.
 
 Because the job retains `environment: production`, the trust policy uses
 these exact conditions:
@@ -171,10 +163,10 @@ and repository IDs in the subject match this GitHub account's customized OIDC
 subject format and prevent a renamed or replaced repository from inheriting
 deployment access.
 
-If the state path already manages the older experimental DynamoDB/queue
-configuration from `feature/first-deploy`, review a state-backed plan and migrate
-or import those resources before the first deployment. This scaffold describes
-the newly requested topology and does not silently transfer the old addresses.
+If an older experimental DynamoDB/queue configuration from
+`feature/first-deploy` still exists in this account, `deploy.py` never
+touches it — it only reads and writes the specific `fcb-*` resource names
+listed above.
 
 ## Main branch and your approval
 
@@ -217,23 +209,42 @@ use it.
 
 ## Local verification (no AWS deployment)
 
-Use Terraform 1.13.0, matching both workflows. Commit `infra/.terraform.lock.hcl`.
-The lock file includes Linux and Windows provider checksums.
-
 ```sh
-terraform -chdir=infra fmt -check -recursive
-terraform -chdir=infra init -backend=false -input=false -lockfile=readonly
-terraform -chdir=infra validate
-terraform -chdir=infra test
+python -m py_compile infra/deploy.py
+pip install -r infra/lambda/pivoter/requirements-dev.txt
+pytest infra/lambda/pivoter
 ```
 
-The tests use a mocked AWS provider to check encryption, naming, role assignment
-and the permissions separating the two workers. The archive provider builds
-local deployment ZIPs. No AWS resources are created by these tests. State,
-local settings, plans and generated ZIPs are ignored by Git.
+There's no dry-run mode for `deploy.py` — unlike `terraform plan`, boto3
+calls don't have an equivalent preview. `deploy.py` is written to be
+idempotent (describe-or-create, then always reapply configuration/tags), so
+re-running it against real AWS is safe, but there's no way to preview a run
+locally without credentials that can actually touch the `fcb-*` resources.
+If you have such credentials, run it directly:
+
+```sh
+python infra/deploy.py --pivoter-image-uri <account>.dkr.ecr.us-east-1.amazonaws.com/fcb-pivoter:<tag>
+```
+
+## No Terraform: what changed and why
+
+This infrastructure was previously Terraform-managed (state in
+`terraform-state-545978922966`, `finance-capybara-infra/terraform.tfstate`).
+It moved to a plain boto3 script because Terraform's `package_type`-replace
+semantics for the pivoter Lambda, combined with the deployer role's
+self-referential IAM bootstrap problem (a role can't grant itself
+permissions it doesn't already have — true regardless of tool, but
+Terraform's own apply-time self-management made it a recurring blocker
+instead of a one-time manual step) and this environment's restrictions on
+running `terraform apply` interactively, made the deploy loop too slow to
+iterate on. The old Terraform state file in the state bucket is no longer
+referenced by anything and was left as-is rather than deleted — the actual
+AWS resources it described continue to exist and are now the source of
+truth `deploy.py` describes-and-reconciles against directly, not something
+recreated from scratch.
 
 References: [SQS KMS permissions](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-key-management.html),
 [S3 SSE-KMS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html),
-[Terraform S3 backend](https://developer.hashicorp.com/terraform/language/backend/s3),
 [GitHub OIDC for AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws),
-[GitHub branch protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
+[GitHub branch protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches),
+[boto3 Lambda client](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/lambda.html).
